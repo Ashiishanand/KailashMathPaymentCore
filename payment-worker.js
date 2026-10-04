@@ -1,4 +1,4 @@
-const VERSION='PAYMENT-CORE-ROBUST-END2END-20261005-1';
+const VERSION='PAYMENT-CORE-ROBUST-END2END-20261005-2';
 const EVENT_NAME='Kailash Yatra Payment Core';
 const LIVE='LIVE';
 const MANUAL='MANUAL';
@@ -29,16 +29,52 @@ async function ensureTargetSchema(db,which){
 }
 function dbFor(env,source){return source===LIVE?env.LIVE_DB:env.MANUAL_DB}
 async function getRegistration(env,rid){
-  const id=clean(rid).toUpperCase();if(!/^KEDAR-\d{3,}$/.test(id))throw Error('Enter a valid Registration ID.');
-  const livePromise=(async()=>{try{return await env.LIVE_DB.prepare(`SELECT r.id,r.registration_id,r.room_type,r.traveller_count,r.price_per_person,r.total_amount,r.registration_amount,r.payment_mode,r.status,p.paid_amount,p.status payment_status,p.payment_method,p.payment_time,p.razorpay_payment_id FROM registrations r JOIN payments p ON p.registration_id=r.id WHERE r.registration_id=? LIMIT 1`).bind(id).first()}catch{return null}})();
-  const manualPromise=(async()=>{try{return await env.MANUAL_DB.prepare(`SELECT r.id,r.registration_id,r.room_type,r.traveller_count,r.price_per_person,r.total_amount,r.status,p.paid_amount,p.status payment_status,p.payment_method,p.payment_time FROM registrations r JOIN payments p ON p.registration_id=r.id WHERE r.registration_id=? LIMIT 1`).bind(id).first()}catch{return null}})();
-  const [live,manual]=await Promise.all([livePromise,manualPromise]);
+  const id=clean(rid).toUpperCase();
+  if(!/^KEDAR-\d{3,}$/.test(id))throw Error('Enter a valid Registration ID.');
+
+  // Do not hide database/binding/schema failures as "Registration ID not found".
+  // Read registrations first and payment separately so a missing payment row
+  // cannot make an otherwise valid registration disappear from the payment portal.
+  async function readSource(db,source){
+    if(!db)throw Error(`${source} payment database binding is missing.`);
+    try{
+      const registration=await db.prepare(`SELECT id,registration_id,room_type,traveller_count,price_per_person,total_amount,status FROM registrations WHERE registration_id=? LIMIT 1`).bind(id).first();
+      if(!registration)return null;
+      let payment=null;
+      try{
+        payment=await db.prepare(`SELECT paid_amount,status AS payment_status,payment_method,payment_time,razorpay_payment_id FROM payments WHERE registration_id=? LIMIT 1`).bind(registration.id).first();
+      }catch(e){
+        console.error(`${source} payment lookup failed for ${id}`,e);
+        throw Error(`${source} payment database schema is unavailable.`);
+      }
+      return {registration,payment};
+    }catch(e){
+      if(e?.message===`${source} payment database schema is unavailable.`)throw e;
+      console.error(`${source} registration lookup failed for ${id}`,e);
+      throw Error(`${source} payment database is unavailable.`);
+    }
+  }
+
+  const [liveResult,manualResult]=await Promise.all([
+    readSource(env.LIVE_DB,LIVE),
+    readSource(env.MANUAL_DB,MANUAL)
+  ]);
+  const live=liveResult?.registration||null,manual=manualResult?.registration||null;
   if(live&&manual)throw Error('This Registration ID exists in both systems. Payment routing is blocked for safety.');
-  const source=live?LIVE:manual?MANUAL:null;if(!source)throw Error('Registration ID not found.');
-  const db=dbFor(env,source);
-  const traveller=await db.prepare(`SELECT full_name,mobile_number FROM travellers WHERE registration_id=? AND traveller_number=1 LIMIT 1`).bind(live?live.id:manual.id).first();
-  const total=money(live?.total_amount??manual?.total_amount),paid=money(live?.paid_amount??manual?.paid_amount),due=Math.max(0,total-paid);
-  return {source,db,record:live||manual,traveller:traveller||{},total,paid,due,registrationAmount:money(live?.registration_amount||0),paymentMode:clean(live?.payment_mode)||'FULL_PAYMENT'};
+  const source=live?LIVE:manual?MANUAL:null;
+  if(!source)throw Error('Registration ID not found.');
+  const db=dbFor(env,source),registration=live||manual;
+  const payment=(liveResult?.payment||manualResult?.payment)||{};
+  const traveller=await db.prepare(`SELECT full_name,mobile_number FROM travellers WHERE registration_id=? AND traveller_number=1 LIMIT 1`).bind(registration.id).first();
+  const total=money(registration.total_amount),paid=money(payment.paid_amount||0),due=Math.max(0,total-paid);
+  return {
+    source,db,
+    record:{...registration,...payment},
+    traveller:traveller||{},
+    total,paid,due,
+    registrationAmount:money(registration.registration_amount||0),
+    paymentMode:clean(registration.payment_mode)||'FULL_PAYMENT'
+  };
 }
 function publicView(x){
   const r=x.record,t=x.traveller||{};
