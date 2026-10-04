@@ -1,4 +1,4 @@
-const VERSION='PAYMENT-CORE-RECOVERY-ROBUST-20261004-1';
+const VERSION='PAYMENT-CORE-ROBUST-END2END-20261005-1';
 const EVENT_NAME='Kailash Yatra Payment Core';
 const LIVE='LIVE';
 const MANUAL='MANUAL';
@@ -102,15 +102,24 @@ async function applyCapturedPayment(env,x,payment){
   return {success:true,registrationId:x.record.registration_id,source:x.source,amountAdded:amount,paidAmount:after,balance:Math.max(0,x.total-after)};
 }
 async function webhook(req,env){
+  // Razorpay may send either a payment entity directly or only the payment-link entity.
+  // Resolve the captured payment deterministically before mutating the database.
   const raw=await req.text(),sig=req.headers.get('X-Razorpay-Signature')||'',eid=req.headers.get('X-Razorpay-Event-Id')||'';
   if(!await validHmac(env.RAZORPAY_WEBHOOK_SECRET,raw,sig))return json({success:false,message:'Invalid webhook signature.'},401);
   let p;try{p=JSON.parse(raw)}catch{return json({success:false,message:'Invalid webhook JSON.'},400)}
   const e=String(p.event||'');
   if(!['payment_link.paid','payment_link.partially_paid'].includes(e))return json({success:true,ignored:true});
   const link=p?.payload?.payment_link?.entity||p?.payload?.payment_link||{};
-  const payment=link?.payments?.[0]||p?.payload?.payment?.entity||{};
+  let payment=link?.payments?.[0]||p?.payload?.payment?.entity||{};
+  if(!payment?.id && link?.id){
+    try{
+      const payments=await razorpay('/payment_links/'+encodeURIComponent(link.id)+'/payments',env);
+      payment=(payments?.items||[]).find(x=>String(x?.status||'').toLowerCase()==='captured')||(payments?.items||[])[0]||{};
+    }catch{}
+  }
   const notes=link?.notes||{};const rid=clean(notes.registration_id||link?.reference_id?.match(/KEDAR-\d+/)?.[0]);
   if(!rid)return json({success:true,ignored:true});
+  if(!payment?.id)return json({success:false,message:'Payment Link event did not contain a resolvable payment.'},422);
   const x=await getRegistration(env,rid);
   if(notes.source&&String(notes.source).toUpperCase()!==x.source)return json({success:false,message:'Payment source mismatch.'},409);
   return json(await applyCapturedPayment(env,x,payment),200);
@@ -119,8 +128,10 @@ async function lookup(req,env){const u=new URL(req.url);return publicView(await 
 export default{async fetch(req,env){const u=new URL(req.url),o=req.headers.get('Origin')||'';if(req.method==='OPTIONS')return new Response(null,{status:204,headers:cors(o)});try{
   if(req.method==='GET'&&u.pathname==='/')return json({success:true,service:EVENT_NAME,version:VERSION,status:'online',sources:['LIVE','MANUAL']},200,o);
   if(req.method==='POST'&&u.pathname==='/webhook/razorpay')return await webhook(req,env);
+  if(req.method==='GET'&&u.pathname==='/api/health')return json({success:true,service:EVENT_NAME,version:VERSION,status:'online',publicRoutes:['GET /api/health','GET /api/payment/lookup','POST /api/payment/create'],adminRoutes:['GET /admin/payment','POST /admin/payment-link','GET /admin/payment-history'],webhook:'/webhook/razorpay'},200,o);
   if(req.method==='GET'&&u.pathname==='/api/payment/lookup')return json({success:true,registration:await lookup(req,env)},200,o);
   if(req.method==='POST'&&u.pathname==='/api/payment/create'){
+    if((req.headers.get('Content-Type')||'').toLowerCase().split(';')[0]!=='application/json')return json({success:false,message:'Content-Type must be application/json.'},415,o);
     const d=await req.json().catch(()=>({})),x=await getRegistration(env,clean(d.registrationId)),amount=money(d.amount||x.due);if(amount<=0)throw Error('There is no amount due for this registration.');return json(await createPaymentLink(env,x,amount,'public'),200,o);
   }
   if(u.pathname.startsWith('/admin/')){
