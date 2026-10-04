@@ -1,4 +1,4 @@
-const VERSION='PAYMENT-CORE-ROBUST-END2END-20261005-2';
+const VERSION='PAYMENT-CORE-ROBUST-END2END-20261005-3';
 const EVENT_NAME='Kailash Yatra Payment Core';
 const LIVE='LIVE';
 const MANUAL='MANUAL';
@@ -27,7 +27,7 @@ async function ensureTargetSchema(db,which){
   else manualSchemaPromise=p.catch(e=>{manualSchemaPromise=null;throw e});
   return slot==='live'?liveSchemaPromise:manualSchemaPromise;
 }
-function dbFor(env,source){return source===LIVE?env.LIVE_DB:env.MANUAL_DB}
+function dbFor(env,source){return source===LIVE?(env.LIVE_DB||env.YATRA_DB||env.LIVE_YATRA_DB):(env.MANUAL_DB||env.MANUAL_YATRA_DB)}
 async function getRegistration(env,rid){
   const id=clean(rid).toUpperCase();
   if(!/^KEDAR-\d{3,}$/.test(id))throw Error('Enter a valid Registration ID.');
@@ -84,7 +84,7 @@ async function razorpay(path,env,method='GET',body){
   const authValue=btoa(`${env.RAZORPAY_KEY_ID}:${env.RAZORPAY_KEY_SECRET}`);
   const r=await fetch(`https://api.razorpay.com/v1${path}`,{method,headers:{Authorization:`Basic ${authValue}`,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
   const text=await r.text();let d={};try{d=JSON.parse(text||'{}')}catch{d={error:{description:text}}}
-  if(!r.ok)throw Error(d?.error?.description||`Razorpay API error ${r.status}`);return d;
+  if(!r.ok){\n    const desc=d?.error?.description||`Razorpay API error ${r.status}`;\n    if(r.status===401)throw Error('Razorpay authentication failed. Payment Core is using an invalid or mismatched Razorpay API Key ID/Secret.');\n    throw Error(desc);\n  }\n  return d;
 }
 async function ensureLegacyPaymentHistory(x){
   await ensureTargetSchema(x.db,x.source);
