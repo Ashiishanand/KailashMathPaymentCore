@@ -1,4 +1,4 @@
-const VERSION='PAYMENT-CORE-ROBUST-END2END-20261005-3';
+const VERSION='PAYMENT-CORE-ROBUST-END2END-20261005-4';
 const EVENT_NAME='Kailash Yatra Payment Core';
 const LIVE='LIVE';
 const MANUAL='MANUAL';
@@ -38,7 +38,7 @@ async function getRegistration(env,rid){
   async function readSource(db,source){
     if(!db)throw Error(`${source} payment database binding is missing.`);
     try{
-      const registration=await db.prepare(`SELECT id,registration_id,room_type,traveller_count,price_per_person,total_amount,status FROM registrations WHERE registration_id=? LIMIT 1`).bind(id).first();
+      const registration=await db.prepare(`SELECT id,registration_id,room_type,traveller_count,price_per_person,total_amount,registration_amount,payment_mode,status FROM registrations WHERE registration_id=? LIMIT 1`).bind(id).first();
       if(!registration)return null;
       let payment=null;
       try{
@@ -56,8 +56,8 @@ async function getRegistration(env,rid){
   }
 
   const [liveResult,manualResult]=await Promise.all([
-    readSource(env.LIVE_DB,LIVE),
-    readSource(env.MANUAL_DB,MANUAL)
+    readSource(env.LIVE_DB||env.YATRA_DB||env.LIVE_YATRA_DB,LIVE),
+    readSource(env.MANUAL_DB||env.MANUAL_YATRA_DB,MANUAL)
   ]);
   const live=liveResult?.registration||null,manual=manualResult?.registration||null;
   if(live&&manual)throw Error('This Registration ID exists in both systems. Payment routing is blocked for safety.');
@@ -81,10 +81,18 @@ function publicView(x){
   return {registrationId:r.registration_id,source:x.source,primaryTravellerName:t.full_name||'',mobileLast4:String(t.mobile_number||'').replace(/\D/g,'').slice(-4)||'',roomType:r.room_type,travellerCount:r.traveller_count,totalAmount:x.total,paidAmount:x.paid,balanceAmount:x.due,paymentStatus:x.paid>=x.total&&x.total>0?'PAID':x.paid>0?'PARTIALLY_PAID':'PENDING'};
 }
 async function razorpay(path,env,method='GET',body){
-  const authValue=btoa(`${env.RAZORPAY_KEY_ID}:${env.RAZORPAY_KEY_SECRET}`);
+  const keyId=clean(env.RAZORPAY_KEY_ID)||clean(env.RAZORPAY_LIVE_KEY_ID);
+  const keySecret=clean(env.RAZORPAY_KEY_SECRET)||clean(env.RAZORPAY_LIVE_KEY_SECRET);
+  if(!keyId||!keySecret)throw Error('Razorpay API credentials are not configured in Payment Core.');
+  const authValue=btoa(`${keyId}:${keySecret}`);
   const r=await fetch(`https://api.razorpay.com/v1${path}`,{method,headers:{Authorization:`Basic ${authValue}`,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
   const text=await r.text();let d={};try{d=JSON.parse(text||'{}')}catch{d={error:{description:text}}}
-  if(!r.ok){\n    const desc=d?.error?.description||`Razorpay API error ${r.status}`;\n    if(r.status===401)throw Error('Razorpay authentication failed. Payment Core is using an invalid or mismatched Razorpay API Key ID/Secret.');\n    throw Error(desc);\n  }\n  return d;
+  if(!r.ok){
+    const desc=d?.error?.description||`Razorpay API error ${r.status}`;
+    if(r.status===401)throw Error('Razorpay authentication failed. Payment Core is using an invalid or mismatched Razorpay API Key ID/Secret.');
+    throw Error(desc);
+  }
+  return d;
 }
 async function ensureLegacyPaymentHistory(x){
   await ensureTargetSchema(x.db,x.source);
