@@ -27,7 +27,7 @@ async function ensureTargetSchema(db,which){
   else manualSchemaPromise=p.catch(e=>{manualSchemaPromise=null;throw e});
   return slot==='live'?liveSchemaPromise:manualSchemaPromise;
 }
-function dbFor(env,source){return source===LIVE?(env.LIVE_DB||env.YATRA_DB||env.LIVE_YATRA_DB):(env.MANUAL_DB||env.MANUAL_YATRA_DB)}
+function dbFor(env,source){return source===LIVE?env.YATRA_DB:env.REGISTER_DB}
 async function getRegistration(env,rid){
   const id=clean(rid).toUpperCase();
   if(!/^KEDAR-\d{3,}$/.test(id))throw Error('Enter a valid Registration ID.');
@@ -56,8 +56,8 @@ async function getRegistration(env,rid){
   }
 
   const [liveResult,manualResult]=await Promise.all([
-    readSource(env.LIVE_DB||env.YATRA_DB||env.LIVE_YATRA_DB,LIVE),
-    readSource(env.MANUAL_DB||env.MANUAL_YATRA_DB,MANUAL)
+    readSource(env.YATRA_DB,LIVE),
+    readSource(env.REGISTER_DB,MANUAL)
   ]);
   const live=liveResult?.registration||null,manual=manualResult?.registration||null;
   if(live&&manual)throw Error('This Registration ID exists in both systems. Payment routing is blocked for safety.');
